@@ -16,7 +16,7 @@ defmodule Ueberauth.Strategy.Slack do
     ]
   """
   use Ueberauth.Strategy, uid_field: :email,
-                          default_scope: "users:read",
+                          default_scope: "identity.basic",
                           oauth2_module: Ueberauth.Strategy.Slack.OAuth
 
   alias Ueberauth.Auth.Info
@@ -67,7 +67,6 @@ defmodule Ueberauth.Strategy.Slack do
       |> store_token(token)
       |> fetch_auth(token)
       |> fetch_user(token)
-      |> fetch_team(token)
     end
   end
 
@@ -101,11 +100,9 @@ defmodule Ueberauth.Strategy.Slack do
 
   @doc false
   def credentials(conn) do
-    token        = conn.private.slack_token
-    auth         = conn.private.slack_auth
-    user         = conn.private.slack_user
-    scope_string = (token.other_params["scope"] || "")
-    scopes       = String.split(scope_string, ",")
+    token  = conn.private.slack_token
+    auth   = conn.private.slack_auth
+    scopes = token_scopes(token)
 
     %Credentials{
       token: token.access_token,
@@ -119,39 +116,38 @@ defmodule Ueberauth.Strategy.Slack do
         user_id: auth["user_id"],
         team: auth["team"],
         team_id: auth["team_id"],
-        team_url: auth["url"],
-        has_2fa: user["has_2fa"],
-        is_admin: user["is_admin"],
-        is_owner: user["is_owner"],
-        is_primary_owner: user["is_primary_owner"],
-        is_restricted: user["is_restricted"],
-        is_ultra_restricted: user["is_ultra_restricted"],
+        team_url: auth["url"]
       }
     }
   end
 
   @doc false
   def info(conn) do
-    user = conn.private.slack_user
-    auth = conn.private.slack_auth
-    image_urls = user["profile"]
-    |> Map.keys
-    |> Enum.filter(&(&1 =~ ~r/^image_/))
-    |> Enum.map(&({&1, user["profile"][&1]}))
-    |> Enum.into(%{})
+    case conn.private do
+      %{slack_user: user} ->
+        auth = conn.private.slack_auth
+        image_urls =
+          user
+          |> Map.keys()
+          |> Enum.filter(&(&1 =~ ~r/^image_/))
+          |> Enum.map(&({&1, user["profile"][&1]}))
+          |> Enum.into(%{})
 
-    %Info{
-      name: name_from_user(user),
-      nickname: user["name"],
-      email: user["profile"]["email"],
-      image: user["profile"]["image_48"],
-      urls: Map.merge(
-        image_urls,
-        %{
-          team_url: auth["url"],
+        %Info{
+          name: user["name"],
+          nickname: user["name"],
+          email: user["email"],
+          image: user["image_48"],
+          urls: Map.merge(
+            image_urls,
+            %{
+              team_url: auth["url"],
+            }
+          )
         }
-      )
-    }
+      _else ->
+        conn
+    end
   end
 
   @doc false
@@ -160,8 +156,7 @@ defmodule Ueberauth.Strategy.Slack do
       raw_info: %{
         auth: conn.private[:slack_auth],
         token: conn.private[:slack_token],
-        user: conn.private[:slack_user],
-        team: conn.private[:slack_team]
+        user: conn.private[:slack_user]
       }
     }
   end
@@ -188,60 +183,33 @@ defmodule Ueberauth.Strategy.Slack do
 
   # Given the auth and token we can now fetch the user.
   defp fetch_user(conn, token) do
-    auth = conn.private.slack_auth
+    scopes = token_scopes(token)
 
-    case Ueberauth.Strategy.Slack.OAuth.get(token, "/users.info", %{user: auth["user_id"]}) do
-      {:ok, %OAuth2.Response{status_code: 401, body: _body}} ->
-        set_errors!(conn, [error("token", "unauthorized")])
-      {:ok, %OAuth2.Response{status_code: status_code, body: user}} when status_code in 200..399 ->
-        if user["ok"] do
-          put_private(conn, :slack_user, user["user"])
-        else
-          set_errors!(conn, [error(user["error"], user["error"])])
-        end
-      {:error, %OAuth2.Error{reason: reason}} ->
-        set_errors!(conn, [error("OAuth2", reason)])
+    if "identity.basic" in scopes do
+      auth = conn.private.slack_auth
+      case Ueberauth.Strategy.Slack.OAuth.get(token, "/users.identity", %{user: auth["user_id"]}) do
+        {:ok, %OAuth2.Response{status_code: 401, body: _body}} ->
+          set_errors!(conn, [error("token", "unauthorized")])
+        {:ok, %OAuth2.Response{status_code: status_code, body: user}} when status_code in 200..399 ->
+          if user["ok"] do
+            put_private(conn, :slack_user, user["user"])
+          else
+            set_errors!(conn, [error(user["error"], user["error"])])
+          end
+        {:error, %OAuth2.Error{reason: reason}} ->
+          set_errors!(conn, [error("OAuth2", reason)])
+      end
+    else
+      conn
     end
-  end
-
-  defp fetch_team(%Plug.Conn{assigns: %{ueberauth_failure: _fails}} = conn, _), do: conn
-
-  defp fetch_team(conn, token) do
-    scope_string = (token.other_params["scope"] || "")
-    scopes       = String.split(scope_string, ",")
-
-    case "team:read" in scopes do
-      false -> conn
-      true  ->
-        case Ueberauth.Strategy.Slack.OAuth.get(token, "/team.info") do
-          {:ok, %OAuth2.Response{status_code: 401, body: _body}} ->
-            set_errors!(conn, [error("token", "unauthorized")])
-          {:ok, %OAuth2.Response{status_code: status_code, body: team}} when status_code in 200..399 ->
-            if team["ok"] do
-              put_private(conn, :slack_team, team["team"])
-            else
-              set_errors!(conn, [error(team["error"], team["error"])])
-            end
-          {:error, %OAuth2.Error{reason: reason}} ->
-            set_errors!(conn, [error("OAuth2", reason)])
-        end
-    end
-  end
-
-  # Fetch the name to use. We try to start with the most specific name avaialble and
-  # fallback to the least.
-  defp name_from_user(user) do
-    [
-      user["profile"]["real_name_normalized"],
-      user["profile"]["real_name"],
-      user["real_name"],
-      user["name"],
-    ]
-    |> Enum.reject(&(&1 == "" || &1 == nil))
-    |> List.first
   end
 
   defp option(conn, key) do
     Dict.get(options(conn), key, Dict.get(default_options, key))
+  end
+
+  defp token_scopes(token) do
+    (token.other_params["scope"] || "")
+    |> String.split(",")
   end
 end
