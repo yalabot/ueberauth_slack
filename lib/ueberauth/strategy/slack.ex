@@ -113,10 +113,10 @@ defmodule Ueberauth.Strategy.Slack do
       scopes: scopes,
       other: %{
         user: auth["user"],
-        user_id: auth["user_id"],
+        user_name: get_in(auth, ~w(user name)),
+        user_id: get_in(auth, ~w(user id)),
         team: auth["team"],
-        team_id: auth["team_id"],
-        team_url: auth["url"]
+        team_id: get_in(auth, ~w(team id))
       }
     }
   end
@@ -125,7 +125,6 @@ defmodule Ueberauth.Strategy.Slack do
   def info(conn) do
     case conn.private do
       %{slack_user: user} ->
-        auth = conn.private.slack_auth
         image_urls =
           user
           |> Map.keys()
@@ -138,12 +137,7 @@ defmodule Ueberauth.Strategy.Slack do
           nickname: user["name"],
           email: user["email"],
           image: user["image_48"],
-          urls: Map.merge(
-            image_urls,
-            %{
-              team_url: auth["url"],
-            }
-          )
+          urls: image_urls
         }
       _else ->
         conn
@@ -163,7 +157,7 @@ defmodule Ueberauth.Strategy.Slack do
 
   # Before we can fetch the user, we first need to fetch the auth to find out what the user id is.
   defp fetch_auth(conn, token) do
-    case Ueberauth.Strategy.Slack.OAuth.get(token, "/auth.test") do
+    case Ueberauth.Strategy.Slack.OAuth.get(token, "/users.identity") do
       {:ok, %OAuth2.Response{status_code: 401, body: _body}} ->
         set_errors!(conn, [error("token", "unauthorized")])
       {:ok, %OAuth2.Response{status_code: status_code, body: auth}} when status_code in 200..399 ->
@@ -185,9 +179,9 @@ defmodule Ueberauth.Strategy.Slack do
   defp fetch_user(conn, token) do
     scopes = token_scopes(token)
 
-    if "identity.basic" in scopes do
+    if "users:read" in scopes do
       auth = conn.private.slack_auth
-      case Ueberauth.Strategy.Slack.OAuth.get(token, "/users.identity", %{user: auth["user_id"]}) do
+      case Ueberauth.Strategy.Slack.OAuth.get(token, "/users.info", %{user: auth["user"]}) do
         {:ok, %OAuth2.Response{status_code: 401, body: _body}} ->
           set_errors!(conn, [error("token", "unauthorized")])
         {:ok, %OAuth2.Response{status_code: status_code, body: user}} when status_code in 200..399 ->
@@ -205,7 +199,7 @@ defmodule Ueberauth.Strategy.Slack do
   end
 
   defp option(conn, key) do
-    Dict.get(options(conn), key, Dict.get(default_options, key))
+    Keyword.get(options(conn), key, Keyword.get(default_options(), key))
   end
 
   defp token_scopes(token) do
