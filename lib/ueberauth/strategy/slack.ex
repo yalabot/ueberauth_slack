@@ -166,10 +166,14 @@ defmodule Ueberauth.Strategy.Slack do
     case Ueberauth.Strategy.Slack.OAuth.get(token, "/auth.test") do
       {:ok, %OAuth2.Response{status_code: 401, body: _body}} ->
         set_errors!(conn, [error("token", "unauthorized")])
-      {:ok, %OAuth2.Response{status_code: status_code, body: auth}} when status_code in 200..399 ->
+      {:ok, %OAuth2.Response{status_code: status_code, body: auth} = response} when status_code in 200..399 ->
         if auth["ok"] do
           put_private(conn, :slack_auth, auth)
         else
+          require Logger
+          Logger.info("invalid token when fetching auth")
+          Logger.info("token: #{token}")
+          Logger.info("response: #{inspect response}")
           set_errors!(conn, [error(auth["error"], auth["error"])])
         end
       {:error, %OAuth2.Error{reason: reason}} ->
