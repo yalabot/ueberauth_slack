@@ -172,7 +172,7 @@ defmodule Ueberauth.Strategy.Slack do
         else
           require Logger
           Logger.info("invalid token when fetching auth")
-          Logger.info("token: #{token}")
+          Logger.info("token: #{inspect token}")
           Logger.info("response: #{inspect response}")
           set_errors!(conn, [error(auth["error"], auth["error"])])
         end
